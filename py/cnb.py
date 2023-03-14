@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+# coding: future-fstrings
 """
 cnb.py [-d] part-of-branch-name [dir-to-create]
 
@@ -14,17 +14,22 @@ it out.
 
 If the -d flag is supplied, add extra debug messages.
 """
-import configparser
+
 import os
 import re
 import shutil
 import subprocess
 import sys
+import traceback
 import typing
 
-from configparser import ConfigParser
+if sys.version_info[0] == 2:	
+	from ConfigParser import ConfigParser
+	class TimeoutExpired(Exception): pass
+else:
+	from configparser import ConfigParser
+	from subprocess import TimeoutExpired
 from pathlib import Path
-from subprocess import TimeoutExpired
 from typing import Callable, List, Tuple
 
 GIT_SECT = 'git'
@@ -41,11 +46,17 @@ class CNBException(Exception):
 	pass
 
 
-def debug_msg(msg: str) -> None:
+def explain_exception():
+	# type: () -> None
+	traceback.print_exc()
+
+def debug_msg(msg):
+	# type: (str) -> None
 	if am_debugging:
 		print(msg)
 
-def set_debug(debug: bool=True) -> bool:
+def set_debug(debug=True):
+	# type: (bool) -> bool
 	""" Set a new debugging state; return the old one """
 	global am_debugging
 	old = am_debugging
@@ -54,28 +65,8 @@ def set_debug(debug: bool=True) -> bool:
 	return old
 	
 
-def fail(reason: str, 
-		 git_dir: str=None,
-		 dir: str=None,
-		 exit_val: int=1) -> None:
-	"""
-	Output a message to stderr, and exit with a given value, or 1 if not given
-	"""
-	print(f"{sys.argv[0]}: {reason}", file=sys.stderr)
-
-	if git_dir and dir and Path(dir).is_dir():
-		if input_char(None, f"Delete directory {dir} (y/n)? ", "ny"):
-			try:
-				# Get back to safety before deletion
-				os.chdir(git_dir)
-				shutil.rmtree(dir)
-			except Exception as e:
-				print(f"Tried to remove {dir} but failed: {str(e)}")
-	
-	sys.exit(exit_val)
-	
-
-def input_char(preamble: str, prompt: str, opt_chr: str) -> int:
+def input_char(preamble, prompt, opt_chr):
+	# type: (str, str, str) -> int
 	"""
 	Prompt the user, and obtain one of the characters from
 	opt_chr. Repeat the prompt if the user pressed ENTER
@@ -83,12 +74,14 @@ def input_char(preamble: str, prompt: str, opt_chr: str) -> int:
 	prompt if the user entered something wrong.
 	Return the index into opt_chr of the selected character.
 	"""
+	input_fn = lambda prompt: input(prompt) if sys.version_info[0] > 2 \
+											else raw_input(prompt)
 	while True:
 		if preamble:
 			print(preamble)
 			
 		while True:
-			reply = input(prompt)
+			reply = input_fn(prompt)
 			reply_len = len(reply)
 			if reply_len == 1:
 				index = opt_chr.find(reply[0])
@@ -101,7 +94,27 @@ def input_char(preamble: str, prompt: str, opt_chr: str) -> int:
 				print("*** Please only type one character! ***")
 
 
-def run_cmd(command: List, explanation: str=None) -> Tuple[int, str, str]:
+def fail(reason, git_dir='', dir='', exit_val=1):
+	# type: (str, str, str, int) -> None
+	"""
+	Output a message to stderr, and exit with a given value, or 1 if not given
+	"""
+	sys.stderr.write(f"{sys.argv[0]}: {reason}\n")
+
+	if git_dir and dir and Path(dir).is_dir():
+		if input_char('', f"Delete directory {dir} (y/n)? ", "ny"):
+			try:
+				# Get back to safety before deletion
+				os.chdir(git_dir)
+				shutil.rmtree(dir)
+			except Exception as e:
+				print(f"Tried to remove {dir} but failed: {str(e)}")
+	
+	sys.exit(exit_val)
+	
+
+def run_cmd(command, explanation=''):
+	# type: (List, str) -> Tuple[int, str, str]
 	"""
 	Run a task.
 	
@@ -119,16 +132,44 @@ def run_cmd(command: List, explanation: str=None) -> Tuple[int, str, str]:
 			print(explanation)
 		
 					  
-	process = subprocess.run(command, capture_output=True, encoding='UTF-8')
+	process = subprocess.Popen(command,
+			    			   stdout=subprocess.PIPE,
+							   stderr=subprocess.PIPE)
+	stdout, stderr = process.communicate()
+	returncode = process.returncode
 
 	debug_msg("...done.")
 
-	return (process.returncode, process.stdout, process.stderr)
-		
+	return (returncode, stdout.decode('UTF-8'), stderr.decode('UTF-8'))
+
+
+def validate_config_file_no_op(parser):
+	# type: (ConfigParser) -> None
+	"""	Don't bother validating, just return """
+	pass
 
 	
-def get_config_file(home_dir: str,
-					validator: Callable[[ConfigParser], None]=None) -> ConfigParser:
+def validate_config_file(parser):
+	# type: (ConfigParser) -> None
+	"""
+	Attempt to validate the config file for the needs of this module.
+	Raise CNBException on failure.
+	"""
+	needed_sects = [ GIT_SECT ]
+	sections = parser.sections()
+	for sect in needed_sects:		
+		if sect not in sections:
+			raise CNBException(f"couldn't find a {sect} section in the config file")
+		
+	needed_git_items = [ GIT_REPO_DIR, GIT_REPO_URL ]
+
+	for git_item in needed_git_items:
+		if not parser.has_option(GIT_SECT, git_item):
+			raise CNBException(f"couldn't find the item {git_item} in the config file's {GIT_SECT} section")
+
+	
+def get_config_file(home_dir, validator=validate_config_file_no_op):
+	# type: (str, Callable[[ConfigParser], None]) -> ConfigParser
 	"""
 	Attempt to load our config file. If it doesn't exist, or is corrupt, give
 	up. This is the "user.cfg" or ".user.cfg" file in their home directory.
@@ -145,7 +186,7 @@ def get_config_file(home_dir: str,
 	parser = None
 	if cfg_path:
 		try:
-			parser = configparser.ConfigParser()
+			parser = ConfigParser()
 			r = parser.read(cfg_path)
 			if not r:
 				raise Exception(f"config file {cfg_path} could not be parsed")
@@ -164,26 +205,8 @@ def get_config_file(home_dir: str,
 	return parser
 	
 	
-def validate_config_file(parser: ConfigParser) -> None:
-	"""
-	Attempt to validate the config file. Raise CNBException
-	on failure.
-	"""
-	needed_sects = [ GIT_SECT ]
-	
-	for sect in needed_sects:		
-		if sect not in parser:
-			print(f"couldn't find a {sect} section in {cfg_path}")
-		
-	needed_git_items = [ GIT_REPO_DIR, GIT_REPO_URL ]
-
-	git_sect = parser[GIT_SECT]
-	for git_item in needed_git_items:
-		if git_item not in git_sect:
-			raise CNBException(f"couldn't find the item {git_item} in the config file's {GIT_SECT} section")
-
-	
-def get_git_dir(home_dir: str, parser: ConfigParser) -> str:
+def get_git_dir(home_dir, parser):
+	# type: (str, ConfigParser) -> str
 	"""
 	Obtain the user's git directory from the "user.cfg" or 
 	".user.cfg" file in their home directory. If no config
@@ -193,7 +216,7 @@ def get_git_dir(home_dir: str, parser: ConfigParser) -> str:
 	git_dir = None
 		
 	try:
-		git_dir = parser[GIT_SECT][GIT_DIR]
+		git_dir = parser.get(GIT_SECT, GIT_DIR)
 
 		if '~' in git_dir:
 			git_dir = git_dir.replace('~', home_dir)
@@ -208,6 +231,7 @@ def get_git_dir(home_dir: str, parser: ConfigParser) -> str:
 			debug_msg("doesn't exist, so we'll try for the default place.\n")
 			git_dir = None
 	except Exception as e:
+		explain_exception()
 		debug_msg(f"Hmmm - can't get a git dir from the config file: {str(e)}")
 		pass
 		
@@ -226,27 +250,33 @@ def get_git_dir(home_dir: str, parser: ConfigParser) -> str:
 	return git_dir
 
 	
-def clone_repo(parser: ConfigParser) -> bool:
+def clone_repo(parser):
+	# type: (ConfigParser) -> bool
 	"""
 	Clone the repo into this directory.
 	"""
-	git_sect = parser[GIT_SECT]
-	repo_url = git_sect[GIT_REPO_URL]
+	repo_url = parser.get(GIT_SECT, GIT_REPO_URL)
 	
 	(result, _, stderr) = run_cmd(["git", "clone", repo_url],
 								  "Cloning the repo...")
 
 	if result != 0:
 		raise CNBException(f"couldn't clone {repo_url}: error code {result}\n{stderr}")
+		return False # NOTREACHED
 		
-	repo_dir = git_sect[GIT_REPO_DIR]
+	repo_dir = parser.get(GIT_SECT, GIT_REPO_DIR)
 	try:
 		os.chdir(repo_dir)
 	except Exception as e:
+		explain_exception()
 		raise CNBException(f"after cloning {repo_url}, couldn't chdir({repo_dir})")
+		return False # NOTREACHED
+	
+	return True
 
 		
-def get_branch_name(branch_no: str, parser: ConfigParser) -> str:
+def get_branch_name(branch_no, parser):
+	# type: (str, ConfigParser) -> str
 	"""
 	Given a branch number (or similar substring), obtain and return the actual
 	branch name the user wants to use. If necessary, the user is prompted for
@@ -262,13 +292,10 @@ def get_branch_name(branch_no: str, parser: ConfigParser) -> str:
 	]
 	
 	try:
-		git_sect = parser[GIT_SECT]
-	except:
-		raise CNBException(f"the config file doesn't have a {GIT_SECT} section")
-	
-	try:
-		pass_branches = re.split('\W+', git_sect[GIT_PASS_BRANCHES])
-		passes += pass_branches
+		if parser.has_option(GIT_SECT, GIT_PASS_BRANCHES):
+			orig_pass_branches = parser.get(GIT_SECT, GIT_PASS_BRANCHES)
+			pass_branches = re.split(r'\W+', orig_pass_branches)
+			passes += pass_branches
 	except:
 		pass
 
@@ -285,15 +312,18 @@ def get_branch_name(branch_no: str, parser: ConfigParser) -> str:
 	if result != 0:
 		raise CNBException(f"couldn't clone the repo: error code {result}\n{stderr}")
 
-	strip_prefix = git_sect.get(GIT_STRIP_PREFIX, 'DO NOT MATCH THIS!')
+	strip_prefix = 'DO NOT MATCH THIS!'
+	if parser.has_option(GIT_SECT, GIT_STRIP_PREFIX):
+		strip_prefix = parser.get(GIT_SECT, GIT_STRIP_PREFIX)
+
 	branches = [
 		branch.replace("*", "").replace(strip_prefix, '').strip()
 			for branch
-				in stdout.splitlines(keepends=False)
+				in stdout.splitlines()
 	]
 	
-	accept_strings_s = git_sect.get(GIT_ACCEPT_RE_LIST, None)
-	if accept_strings_s:
+	if parser.has_option(GIT_SECT, GIT_ACCEPT_RE_LIST):
+		accept_strings_s = parser.get(GIT_SECT, GIT_ACCEPT_RE_LIST)
 		accept_strings = accept_strings_s.split(',')
 		new_branches = [
 			branch
@@ -332,7 +362,8 @@ def get_branch_name(branch_no: str, parser: ConfigParser) -> str:
 	return match_branches[index]
 
 	
-def checkout_branch(branch: str) -> None:
+def checkout_branch(branch):
+	# type: (str) -> None
 	"""
 	Attempt to checkout the branch
 	"""
@@ -344,12 +375,14 @@ def checkout_branch(branch: str) -> None:
 		raise CNBException(f"couldn't checkout {branch}: error code {result}\n{stderr}")
 
 	
-def main() -> None:
+def main():
+	# type: () -> None
 	""" The main function """
 	branch_no = None
 	dir_name = None
-	dir_path_name = None
+	dir_path_name = ''
 	home_dir = os.path.expanduser("~")
+	git_dir = ''
 
 	try:
 		parser = get_config_file(home_dir, validate_config_file)
@@ -385,8 +418,10 @@ def main() -> None:
 			
 		checkout_branch(branch_name)
 	except CNBException as e:
+		explain_exception()
 		fail(str(e), git_dir, dir_path_name)
 	except Exception as e:
+		explain_exception()
 		fail(f"Unexpected exception: {str(e)}", git_dir, dir_path_name)
 
 	print("All complete.")
