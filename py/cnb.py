@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: future-fstrings
 """
-cnb.py [-d] part-of-branch-name [dir-to-create]
+cnb.py [-d] [-l] part-of-branch-name [dir-to-create]
 
 If dir-to-create is not supplied, part-of-branch-name is used in its place.
 
@@ -13,8 +13,12 @@ less than an arbitrarily large number, select which one you want and check
 it out.
 
 If the -d flag is supplied, add extra debug messages.
+
+If the -l flag is supplied, matching will be looser. Anything that matches
+the part-of-branch-name will be accepted. This may lead to too many matches!
 """
 
+import argparse
 import os
 import re
 import shutil
@@ -275,8 +279,8 @@ def clone_repo(parser):
 	return True
 
 		
-def get_branch_name(branch_no, parser):
-	# type: (str, ConfigParser) -> str
+def get_branch_name(branch_no, parser, loose):
+	# type: (str, ConfigParser, Bool) -> str
 	"""
 	Given a branch number (or similar substring), obtain and return the actual
 	branch name the user wants to use. If necessary, the user is prompted for
@@ -321,8 +325,9 @@ def get_branch_name(branch_no, parser):
 			for branch
 				in stdout.splitlines()
 	]
-	
-	if parser.has_option(GIT_SECT, GIT_ACCEPT_RE_LIST):
+
+	# Only attempt to restrict matches if not being loose
+	if parser.has_option(GIT_SECT, GIT_ACCEPT_RE_LIST) and not loose:
 		accept_strings_s = parser.get(GIT_SECT, GIT_ACCEPT_RE_LIST)
 		accept_strings = accept_strings_s.split(',')
 		new_branches = [
@@ -375,11 +380,11 @@ def checkout_branch(branch):
 		raise CNBException(f"couldn't checkout {branch}: error code {result}\n{stderr}")
 
 	
-def main():
-	# type: () -> None
+def main(args):
+	# type: (argparse.Namespace) -> None
 	""" The main function """
-	branch_no = None
-	dir_name = None
+	branch_no = args.branch_no
+	dir_name = args.dir_name if args.dir_name else branch_no
 	dir_path_name = ''
 	home_dir = os.path.expanduser("~")
 	git_dir = ''
@@ -388,13 +393,6 @@ def main():
 		parser = get_config_file(home_dir, validate_config_file)
 		git_dir = get_git_dir(home_dir, parser)
 		
-		num_args = len(sys.argv) - 1
-		args_exp = "one or two arguments expected"
-		if num_args < 1 or num_args > 2:
-			fail(args_exp, git_dir)
-		branch_no = sys.argv[1]
-		dir_name = sys.argv[2] if num_args == 2 else branch_no
-
 		dir_path = Path(git_dir, dir_name)
 		dir_path_name = str(dir_path)
 		if dir_path.exists():
@@ -412,7 +410,7 @@ def main():
 		
 		clone_repo(parser)
 		
-		branch_name = get_branch_name(branch_no, parser)
+		branch_name = get_branch_name(branch_no, parser, args.loose)
 		if branch_name == None:
 			raise CNBException(f"couldn't get a branch name for {branch_no}")
 			
@@ -428,8 +426,26 @@ def main():
 
 
 if __name__ == "__main__":
-	if len(sys.argv) > 1 and sys.argv[1] == "-d":
-		sys.argv = [ sys.argv[0] ] + sys.argv[2:]
-		set_debug()
 
-	main()
+	parser = argparse.ArgumentParser(
+		prog="cnb",
+		description="Create a clone of a new branch")
+		
+	parser.add_argument('-d', '--debug', 
+						action='store_true',
+						help='enable debugging messages')
+	parser.add_argument('-l', '--loose',
+						action='store_true',
+						help='enable looser matching')
+	parser.add_argument('branch_no',
+						help='part of branch name to match, typically the number from a DT-xxx JIRA task')
+	parser.add_argument('dir_name',
+						nargs='?',
+						default=None,
+						help='directory name to create (default branch_part)')
+	args = parser.parse_args()
+	
+	if args.debug:
+		set_debug(True)
+
+	main(args)
